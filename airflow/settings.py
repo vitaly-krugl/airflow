@@ -18,6 +18,7 @@ from __future__ import print_function
 from __future__ import unicode_literals
 
 import logging
+from logging.config import fileConfig as logging_config
 import os
 import sys
 
@@ -27,6 +28,8 @@ from sqlalchemy.pool import NullPool
 
 from airflow import configuration as conf
 
+# The function to get the SqlAlchemy engine per Akamai configuration
+from dataaccess.postgresql.database import get_engine
 
 class DummyStatsLogger(object):
 
@@ -121,6 +124,8 @@ def configure_logging(log_format=LOG_FORMAT):
     logging.root.handlers = []
     logging.basicConfig(
         format=log_format, stream=sys.stdout, level=LOGGING_LEVEL)
+    logging_config(os.environ['AKAMAI_AIRFLOW_CONFIG'],
+                   disable_existing_loggers=False)
 
 
 def configure_vars():
@@ -144,7 +149,9 @@ def configure_orm(disable_connection_pool=False):
         engine_args['pool_recycle'] = conf.getint('core',
                                                   'SQL_ALCHEMY_POOL_RECYCLE')
 
-    engine = create_engine(SQL_ALCHEMY_CONN, **engine_args)
+
+    # engine = create_engine(SQL_ALCHEMY_CONN, **engine_args)
+    engine = get_engine()
     Session = scoped_session(
         sessionmaker(autocommit=False, autoflush=False, bind=engine))
 
@@ -157,6 +164,7 @@ except:
 configure_logging()
 configure_vars()
 configure_orm()
+
 
 # Const stuff
 

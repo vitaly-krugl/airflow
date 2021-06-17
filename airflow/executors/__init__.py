@@ -19,6 +19,7 @@ from airflow import configuration
 from airflow.executors.base_executor import BaseExecutor
 from airflow.executors.local_executor import LocalExecutor
 from airflow.executors.sequential_executor import SequentialExecutor
+# from airflow.executors.dbq_executor import DBQExecutor
 
 try:
     from airflow.executors.celery_executor import CeleryExecutor
@@ -46,6 +47,8 @@ elif _EXECUTOR == 'SequentialExecutor':
 elif _EXECUTOR == 'MesosExecutor':
     from airflow.contrib.executors.mesos_executor import MesosExecutor
     DEFAULT_EXECUTOR = MesosExecutor()
+elif _EXECUTOR == 'DBQExecutor':
+    DEFAULT_EXECUTOR = DBQExecutor()
 else:
     # Loading plugins
     _integrate_plugins()

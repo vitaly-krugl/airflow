@@ -28,6 +28,10 @@ class AirflowSensorTimeout(AirflowException):
     pass
 
 
+class AirflowWebServerTimeout(AirflowException):
+    pass
+
+
 class AirflowTaskTimeout(AirflowException):
     pass
 

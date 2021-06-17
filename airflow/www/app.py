@@ -30,9 +30,12 @@ from airflow.www.blueprints import routes
 from airflow import jobs
 from airflow import settings
 from airflow import configuration
+from operator_view_logs.view_logs import ViewLogs
 
+from flask import request, make_response
 
 def create_app(config=None, testing=False):
+
     app = Flask(__name__)
     app.secret_key = configuration.get('webserver', 'SECRET_KEY')
     app.config['LOGIN_DISABLED'] = not configuration.getboolean('webserver', 'AUTHENTICATE')
@@ -56,17 +59,19 @@ def create_app(config=None, testing=False):
     log_format = airflow.settings.LOG_FORMAT_WITH_PID
     airflow.settings.configure_logging(log_format=log_format)
 
+
     with app.app_context():
         from airflow.www import views
 
         admin = Admin(
             app, name='Airflow',
             static_url_path='/admin',
-            index_view=views.HomeView(endpoint='', url='/admin', name="DAGs"),
+            index_view=views.HomeView(endpoint='', url='/admin', name="Home"),
             template_mode='bootstrap3',
         )
         av = admin.add_view
         vs = views
+
         av(vs.Airflow(name='DAGs', category='DAGs'))
 
         av(vs.QueryView(name='Ad Hoc Query', category="Data Profiling"))
@@ -96,6 +101,7 @@ def create_app(config=None, testing=False):
             models.Variable, Session, name="Variables", category="Admin"))
         av(vs.XComView(
             models.XCom, Session, name="XComs", category="Admin"))
+        av(ViewLogs(name='View Logs', endpoint='view_logs'))
 
         admin.add_link(base.MenuLink(
             category='Docs', name='Documentation',

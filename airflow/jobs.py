@@ -776,7 +776,8 @@ class SchedulerJob(BaseJob):
                 if next_start <= now:
                     new_start = last_start
                 else:
-                    new_start = dag.previous_schedule(last_start)
+                    # new_start = dag.previous_schedule(last_start)
+                    new_start = last_start
 
                 if dag.start_date:
                     if new_start >= dag.start_date:
