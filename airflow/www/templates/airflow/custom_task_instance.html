@@ -1,0 +1,52 @@
+{% extends "airflow/master.html" %}
+{% import 'admin/lib.html' as lib with context %}
+
+{% block title %}Airflow - View Logs {% endblock %}
+
+{% block head_css %}
+  {{ lib.form_css() }}
+  {{ super() }}
+  <link href="{{ url_for("static", filename="bootstrap-toggle.min.css") }}" rel="stylesheet" type="text/css">
+{% endblock %}
+
+{% block body %}
+<div class="container">
+    <h3>Task Instances</h3>
+  <table class="table table-bordered">
+    <thead class="thead-dark">
+      <tr>
+        <th scope="col">State</th>
+        <th scope="col">Dag Id</th>
+        <th scope="col">Task Id</th>
+        <th scope="col">Try Number</th>
+        <th scope="col">Execution Date</th>
+        <th scope="col">Start Date</th>
+        <th scope="col">End Date</th>
+        <th scope="col">Duration (s)</th>
+        <th scope="col">Job Id</th>
+        <th scope="col">Log Url</th>
+      </tr>
+    </thead>
+    <tbody>
+     {% for i in qry_res%}
+            <tr>
+               <td> {{ i.state }} </td>
+               <td> {{ i.dag_id }} </td>
+               <td> {{ i.task_id }} </td>
+               <td> {{ i.try_number }} </td>
+               <td> {{ i.execution_date }} </td>
+               <td> {{ i.start_date }} </td>
+               <td> {{ i.end_date }} </td>
+               <td> {{ i.duration }} </td>
+               <td> {{ i.job_id }} </td>
+               <td> <a href="{{ i.log_url }}">View</a> </td>
+            </tr>
+     {% endfor %}
+
+    </tbody>
+  </table>
+  </div>
+<form>
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
+</form>
+{% endblock %}

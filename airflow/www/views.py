@@ -74,6 +74,7 @@ from airflow.utils.dates import infer_time_unit, scale_time_units
 from airflow.www import utils as wwwutils
 from airflow.www.forms import DateTimeForm, DateTimeWithNumRunsForm
 from airflow.configuration import AirflowConfigException
+from akamai_env import user_profiles as custom_profiles
 
 QUERY_LIMIT = 100000
 CHART_LIMIT = 200000
@@ -279,15 +280,105 @@ def should_hide_value_for_key(key_name):
            and conf.getboolean('admin', 'hide_sensitive_variable_fields')
 
 
-class Airflow(BaseView):
-
-    def is_visible(self):
-        return False
+class Airflow(custom_profiles.SmeProfile, BaseView):
 
     @expose('/')
     @login_required
     def index(self):
-        return self.render('airflow/dags.html')
+        session = Session()
+        DM = models.DagModel
+        qry = None
+
+        # restrict the dags shown if filter_by_owner and current user is not superuser
+        do_filter = FILTER_BY_OWNER and (not current_user.is_superuser())
+        owner_mode = conf.get('webserver', 'OWNER_MODE').strip().lower()
+
+        hide_paused_dags_by_default = conf.getboolean('webserver',
+                                                      'hide_paused_dags_by_default')
+        show_paused_arg = request.args.get('showPaused', 'None')
+        if show_paused_arg.strip().lower() == 'false':
+            hide_paused = True
+
+        elif show_paused_arg.strip().lower() == 'true':
+            hide_paused = False
+
+        else:
+            hide_paused = hide_paused_dags_by_default
+
+        # read orm_dags from the db
+        qry = session.query(DM)
+        qry_fltr = []
+
+        if do_filter and owner_mode == 'ldapgroup':
+            qry_fltr = qry.filter(
+                ~DM.is_subdag, DM.is_active,
+                DM.owners.in_(current_user.ldap_groups)
+            ).all()
+        elif do_filter and owner_mode == 'user':
+            qry_fltr = qry.filter(
+                ~DM.is_subdag, DM.is_active,
+                DM.owners == current_user.user.username
+            ).all()
+        else:
+            qry_fltr = qry.filter(
+                ~DM.is_subdag, DM.is_active
+            ).all()
+
+        # optionally filter out "paused" dags
+        if hide_paused:
+            orm_dags = {dag.dag_id: dag for dag in qry_fltr if not dag.is_paused}
+
+        else:
+            orm_dags = {dag.dag_id: dag for dag in qry_fltr}
+
+        import_errors = session.query(models.ImportError).all()
+        for ie in import_errors:
+            flash(
+                "Broken DAG: [{ie.filename}] {ie.stacktrace}".format(ie=ie),
+                "error")
+        session.expunge_all()
+        session.commit()
+        session.close()
+
+        # get a list of all non-subdag dags visible to everyone
+        # optionally filter out "paused" dags
+        if hide_paused:
+            unfiltered_webserver_dags = [dag for dag in dagbag.dags.values() if
+                                         not dag.parent_dag and not dag.is_paused]
+
+        else:
+            unfiltered_webserver_dags = [dag for dag in dagbag.dags.values() if
+                                         not dag.parent_dag]
+
+        # optionally filter to get only dags that the user should see
+        if do_filter and owner_mode == 'ldapgroup':
+            # only show dags owned by someone in @current_user.ldap_groups
+            webserver_dags = {
+                dag.dag_id: dag
+                for dag in unfiltered_webserver_dags
+                if dag.owner in current_user.ldap_groups
+            }
+        elif do_filter and owner_mode == 'user':
+            # only show dags owned by @current_user.user.username
+            webserver_dags = {
+                dag.dag_id: dag
+                for dag in unfiltered_webserver_dags
+                if dag.owner == current_user.user.username
+            }
+        else:
+            webserver_dags = {
+                dag.dag_id: dag
+                for dag in unfiltered_webserver_dags
+            }
+
+        all_dag_ids = sorted(set(orm_dags.keys()) | set(webserver_dags.keys()))
+        return self.render('airflow/dags.html',
+            webserver_dags=webserver_dags,
+            orm_dags=orm_dags,
+            hide_paused=hide_paused,
+            all_dag_ids=all_dag_ids)
+
+
 
     @expose('/chart_data')
     @data_profiling_required
@@ -689,97 +780,6 @@ class Airflow(BaseView):
             execution_date=execution_date,
             form=form,
             title=title,)
-
-    @expose('/log')
-    @login_required
-    @wwwutils.action_logging
-    def log(self):
-        BASE_LOG_FOLDER = os.path.expanduser(
-            conf.get('core', 'BASE_LOG_FOLDER'))
-        dag_id = request.args.get('dag_id')
-        task_id = request.args.get('task_id')
-        execution_date = request.args.get('execution_date')
-        dag = dagbag.get_dag(dag_id)
-        log_relative = "{dag_id}/{task_id}/{execution_date}".format(
-            **locals())
-        loc = os.path.join(BASE_LOG_FOLDER, log_relative)
-        loc = loc.format(**locals())
-        log = ""
-        TI = models.TaskInstance
-        session = Session()
-        dttm = dateutil.parser.parse(execution_date)
-        ti = session.query(TI).filter(
-            TI.dag_id == dag_id, TI.task_id == task_id,
-            TI.execution_date == dttm).first()
-        dttm = dateutil.parser.parse(execution_date)
-        form = DateTimeForm(data={'execution_date': dttm})
-
-        if ti:
-            host = ti.hostname
-            log_loaded = False
-
-            if os.path.exists(loc):
-                try:
-                    f = open(loc)
-                    log += "".join(f.readlines())
-                    f.close()
-                    log_loaded = True
-                except:
-                    log = "*** Failed to load local log file: {0}.\n".format(loc)
-            else:
-                WORKER_LOG_SERVER_PORT = \
-                    conf.get('celery', 'WORKER_LOG_SERVER_PORT')
-                url = os.path.join(
-                    "http://{host}:{WORKER_LOG_SERVER_PORT}/log", log_relative
-                    ).format(**locals())
-                log += "*** Log file isn't local.\n"
-                log += "*** Fetching here: {url}\n".format(**locals())
-                try:
-                    import requests
-                    timeout = None  # No timeout
-                    try:
-                        timeout = conf.getint('webserver', 'log_fetch_timeout_sec')
-                    except (AirflowConfigException, ValueError):
-                        pass
-
-                    response = requests.get(url, timeout=timeout)
-                    response.raise_for_status()
-                    log += '\n' + response.text
-                    log_loaded = True
-                except:
-                    log += "*** Failed to fetch log file from worker.\n".format(
-                        **locals())
-
-            if not log_loaded:
-                # load remote logs
-                remote_log_base = conf.get('core', 'REMOTE_BASE_LOG_FOLDER')
-                remote_log = os.path.join(remote_log_base, log_relative)
-                log += '\n*** Reading remote logs...\n'
-
-                # S3
-                if remote_log.startswith('s3:/'):
-                    log += log_utils.S3Log().read(remote_log, return_error=True)
-
-                # GCS
-                elif remote_log.startswith('gs:/'):
-                    log += log_utils.GCSLog().read(remote_log, return_error=True)
-
-                # unsupported
-                elif remote_log:
-                    log += '*** Unsupported remote log location.'
-
-            session.commit()
-            session.close()
-
-        if PY2 and not isinstance(log, unicode):
-            log = log.decode('utf-8')
-
-        title = "Log"
-
-        return self.render(
-            'airflow/ti_code.html',
-            code=log, dag=dag, title=title, task_id=task_id,
-            execution_date=execution_date, form=form)
 
     @expose('/task')
     @login_required
@@ -1765,102 +1765,10 @@ class HomeView(AdminIndexView):
     @expose("/")
     @login_required
     def index(self):
-        session = Session()
-        DM = models.DagModel
-        qry = None
-
-        # restrict the dags shown if filter_by_owner and current user is not superuser
-        do_filter = FILTER_BY_OWNER and (not current_user.is_superuser())
-        owner_mode = conf.get('webserver', 'OWNER_MODE').strip().lower()
-
-        hide_paused_dags_by_default = conf.getboolean('webserver',
-                                                      'hide_paused_dags_by_default')
-        show_paused_arg = request.args.get('showPaused', 'None')
-        if show_paused_arg.strip().lower() == 'false':
-            hide_paused = True
-
-        elif show_paused_arg.strip().lower() == 'true':
-            hide_paused = False
-
-        else:
-            hide_paused = hide_paused_dags_by_default
-
-        # read orm_dags from the db
-        qry = session.query(DM)
-        qry_fltr = []
-
-        if do_filter and owner_mode == 'ldapgroup':
-            qry_fltr = qry.filter(
-                ~DM.is_subdag, DM.is_active,
-                DM.owners.in_(current_user.ldap_groups)
-            ).all()
-        elif do_filter and owner_mode == 'user':
-            qry_fltr = qry.filter(
-                ~DM.is_subdag, DM.is_active,
-                DM.owners == current_user.user.username
-            ).all()
-        else:
-            qry_fltr = qry.filter(
-                ~DM.is_subdag, DM.is_active
-            ).all()
-
-        # optionally filter out "paused" dags
-        if hide_paused:
-            orm_dags = {dag.dag_id: dag for dag in qry_fltr if not dag.is_paused}
-
-        else:
-            orm_dags = {dag.dag_id: dag for dag in qry_fltr}
-
-        import_errors = session.query(models.ImportError).all()
-        for ie in import_errors:
-            flash(
-                "Broken DAG: [{ie.filename}] {ie.stacktrace}".format(ie=ie),
-                "error")
-        session.expunge_all()
-        session.commit()
-        session.close()
-
-        # get a list of all non-subdag dags visible to everyone
-        # optionally filter out "paused" dags
-        if hide_paused:
-            unfiltered_webserver_dags = [dag for dag in dagbag.dags.values() if
-                                         not dag.parent_dag and not dag.is_paused]
-
-        else:
-            unfiltered_webserver_dags = [dag for dag in dagbag.dags.values() if
-                                         not dag.parent_dag]
-
-        # optionally filter to get only dags that the user should see
-        if do_filter and owner_mode == 'ldapgroup':
-            # only show dags owned by someone in @current_user.ldap_groups
-            webserver_dags = {
-                dag.dag_id: dag
-                for dag in unfiltered_webserver_dags
-                if dag.owner in current_user.ldap_groups
-            }
-        elif do_filter and owner_mode == 'user':
-            # only show dags owned by @current_user.user.username
-            webserver_dags = {
-                dag.dag_id: dag
-                for dag in unfiltered_webserver_dags
-                if dag.owner == current_user.user.username
-            }
-        else:
-            webserver_dags = {
-                dag.dag_id: dag
-                for dag in unfiltered_webserver_dags
-            }
-
-        all_dag_ids = sorted(set(orm_dags.keys()) | set(webserver_dags.keys()))
-        return self.render(
-            'airflow/dags.html',
-            webserver_dags=webserver_dags,
-            orm_dags=orm_dags,
-            hide_paused=hide_paused,
-            all_dag_ids=all_dag_ids)
+        return self.render('airflow/home.html')
 
 
-class QueryView(wwwutils.DataProfilingMixin, BaseView):
+class QueryView(custom_profiles.SmeProfile,BaseView):
     @expose('/')
     @wwwutils.gzipped
     def query(self):
@@ -1934,7 +1842,7 @@ class AirflowModelView(ModelView):
     page_size = 500
 
 
-class ModelViewOnly(wwwutils.LoginMixin, AirflowModelView):
+class ModelViewOnly(custom_profiles.SmeProfile, AirflowModelView):
     """
     Modifying the base ModelView class for non edit, browse only operations
     """
@@ -1945,14 +1853,14 @@ class ModelViewOnly(wwwutils.LoginMixin, AirflowModelView):
     column_display_pk = True
 
 
-class PoolModelView(wwwutils.SuperUserMixin, AirflowModelView):
+class PoolModelView(custom_profiles.SmeProfile, AirflowModelView):
     column_list = ('pool', 'slots', 'used_slots', 'queued_slots')
     column_formatters = dict(
         pool=pool_link, used_slots=fused_slots, queued_slots=fqueued_slots)
     named_filter_urls = True
 
 
-class SlaMissModelView(wwwutils.SuperUserMixin, ModelViewOnly):
+class SlaMissModelView(ModelViewOnly):
     verbose_name_plural = "SLA misses"
     verbose_name = "SLA miss"
     column_list = (
@@ -1972,7 +1880,7 @@ class SlaMissModelView(wwwutils.SuperUserMixin, ModelViewOnly):
     }
 
 
-class ChartModelView(wwwutils.DataProfilingMixin, AirflowModelView):
+class ChartModelView(custom_profiles.SmeProfile, AirflowModelView):
     verbose_name = "chart"
     verbose_name_plural = "charts"
     form_columns = (
@@ -2081,7 +1989,7 @@ chart_mapping = (
 chart_mapping = dict(chart_mapping)
 
 
-class KnowEventView(wwwutils.DataProfilingMixin, AirflowModelView):
+class KnowEventView(custom_profiles.SmeProfile, AirflowModelView):
     verbose_name = "known event"
     verbose_name_plural = "known events"
     form_columns = (
@@ -2096,7 +2004,7 @@ class KnowEventView(wwwutils.DataProfilingMixin, AirflowModelView):
     column_default_sort = ("start_date", True)
 
 
-class KnowEventTypeView(wwwutils.DataProfilingMixin, AirflowModelView):
+class KnowEventTypeView(custom_profiles.SmeProfile, AirflowModelView):
     pass
 
 
@@ -2113,7 +2021,7 @@ class KnowEventTypeView(wwwutils.DataProfilingMixin, AirflowModelView):
 # admin.add_view(mv)
 
 
-class VariableView(wwwutils.DataProfilingMixin, AirflowModelView):
+class VariableView(custom_profiles.SmeProfile, AirflowModelView):
     verbose_name = "Variable"
     verbose_name_plural = "Variables"
     list_template = 'airflow/variable_list.html'
@@ -2172,7 +2080,7 @@ class VariableView(wwwutils.DataProfilingMixin, AirflowModelView):
             form.val.data = '*' * 8
 
 
-class XComView(wwwutils.SuperUserMixin, AirflowModelView):
+class XComView(custom_profiles.SmeProfile, AirflowModelView):
     verbose_name = "XCom"
     verbose_name_plural = "XComs"
     page_size = 20
@@ -2412,7 +2320,7 @@ class TaskInstanceModelView(ModelViewOnly):
         return self.session.query(self.model).get((task_id, dag_id, execution_date))
 
 
-class ConnectionModelView(wwwutils.SuperUserMixin, AirflowModelView):
+class ConnectionModelView(custom_profiles.SmeProfile, AirflowModelView):
     create_template = 'airflow/conn_create.html'
     edit_template = 'airflow/conn_edit.html'
     list_template = 'airflow/conn_list.html'
@@ -2502,7 +2410,7 @@ class ConnectionModelView(wwwutils.SuperUserMixin, AirflowModelView):
                 field.data = value
 
 
-class UserModelView(wwwutils.SuperUserMixin, AirflowModelView):
+class UserModelView(custom_profiles.SmeProfile, AirflowModelView):
     verbose_name = "User"
     verbose_name_plural = "Users"
     column_default_sort = 'username'
@@ -2534,7 +2442,7 @@ class VersionView(wwwutils.SuperUserMixin, LoggingMixin, BaseView):
                            git_version=git_version)
 
 
-class ConfigurationView(wwwutils.SuperUserMixin, BaseView):
+class ConfigurationView(custom_profiles.SmeProfile, BaseView):
     @expose('/')
     def conf(self):
         raw = request.args.get('raw') == "true"
@@ -2570,7 +2478,7 @@ class ConfigurationView(wwwutils.SuperUserMixin, BaseView):
                 table=table)
 
 
-class DagModelView(wwwutils.SuperUserMixin, ModelView):
+class DagModelView(custom_profiles.SmeProfile, ModelView):
     column_list = ('dag_id', 'owners')
     column_editable_list = ('is_paused',)
     form_excluded_columns = ('is_subdag', 'is_active')
